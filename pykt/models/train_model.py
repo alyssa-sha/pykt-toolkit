@@ -66,7 +66,7 @@ def cal_loss(model, ys, r, rshft, sm, preloss=[]):
         loss_w2 = loss_w2.mean() / model.num_c
 
         loss = loss + model.lambda_r * loss_r + model.lambda_w1 * loss_w1 + model.lambda_w2 * loss_w2
-    elif model_name in ["akt","extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx","lefokt_akt", "dtransformer", "fluckt"]:
+    elif model_name in ["akt", "aktint", "extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx","lefokt_akt", "dtransformer", "fluckt"]:
         y = torch.masked_select(ys[0], sm)
         t = torch.masked_select(rshft, sm)
         loss = binary_cross_entropy(y.double(), t.double()) + preloss[0]
@@ -83,10 +83,34 @@ def model_forward(model, data, rel=None):
     model_name = model.model_name
     # if model_name in ["dkt_forget", "lpkt"]:
     #     q, c, r, qshft, cshft, rshft, m, sm, d, dshft = data
-    if model_name in ["dkt_forget", "datakt"]:
-        dcur, dgaps = data
-    else:
+    # Models that use interference gap data (dgaps)
+    # Handle data format: may be (dcur, dgaps) tuple or just dcur
+
+    # Check if data is a tuple/list with first element being a dict (dcur)
+    if isinstance(data, (tuple, list)) and len(data) >= 2 and isinstance(data[0], dict):
+        dcur, dgaps = data[0], data[1]
+        # Only use dgaps for models that support interference
+        if model_name not in ["dkt_forget", "datakt", "aktint"]:
+            dgaps = None
+    elif isinstance(data, dict):
         dcur = data
+        dgaps = None
+    elif isinstance(data, (tuple, list)) and len(data) >= 2:
+        # Try to handle case where collation changed the structure
+        # The DataLoader might return [dcur_batch, dgaps_batch] where each is a list of dicts
+        # or it might batch by key differently
+        first_elem = data[0]
+        if isinstance(first_elem, dict):
+            dcur, dgaps = data[0], data[1] if len(data) > 1 else None
+        else:
+            # Unexpected format - try to use as-is
+            print(f"WARNING: Unexpected data format. type(data)={type(data)}, type(data[0])={type(first_elem)}")
+            dcur = data
+            dgaps = None
+    else:
+        # Fallback: assume it's dcur directly
+        dcur = data
+        dgaps = None
     if model_name in ["dimkt"]:
         q, c, r, t,sd,qd = dcur["qseqs"].to(device), dcur["cseqs"].to(device), dcur["rseqs"].to(device), dcur["tseqs"].to(device),dcur["sdseqs"].to(device),dcur["qdseqs"].to(device)
         qshft, cshft, rshft, tshft,sdshft,qdshft = dcur["shft_qseqs"].to(device), dcur["shft_cseqs"].to(device), dcur["shft_rseqs"].to(device), dcur["shft_tseqs"].to(device),dcur["shft_sdseqs"].to(device),dcur["shft_qdseqs"].to(device)
@@ -217,8 +241,21 @@ def model_forward(model, data, rel=None):
     elif model_name in ["saint"]:
         y = model(cq.long(), cc.long(), r.long())
         ys.append(y[:, 1:])
-    elif model_name in ["akt","extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lefokt_akt", "fluckt"]:               
-        y, reg_loss = model(cc.long(), cr.long(), cq.long())
+    elif model_name in ["akt", "aktint", "extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lefokt_akt", "fluckt"]:
+        # Prepare dgaps for AKTInt interference-based forgetting
+        if model_name == "aktint" and dgaps is not None:
+            # Build concatenated sgaps and pcounts (same pattern as cc, cr, cq)
+            sgaps = dgaps["sgaps"].to(device)
+            pcounts = dgaps["pcounts"].to(device)
+            sgaps_shft = dgaps["shft_sgaps"].to(device)
+            pcounts_shft = dgaps["shft_pcounts"].to(device)
+            # Concatenate to match cc, cr, cq structure: [first_item, shifted_items]
+            csgaps = torch.cat((sgaps[:,0:1], sgaps_shft), dim=1)
+            cpcounts = torch.cat((pcounts[:,0:1], pcounts_shft), dim=1)
+            dgaps_model = {"sgaps": csgaps, "pcounts": cpcounts}
+            y, reg_loss = model(cc.long(), cr.long(), cq.long(), dgaps=dgaps_model)
+        else:
+            y, reg_loss = model(cc.long(), cr.long(), cq.long())
         ys.append(y[:,1:])
         preloss.append(reg_loss)
     elif model_name in ["atkt", "atktfix"]:

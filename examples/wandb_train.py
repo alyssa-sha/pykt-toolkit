@@ -39,8 +39,10 @@ def main(params):
     with open("../configs/kt_config.json") as f:
         config = json.load(f)
         train_config = config["train_config"]
-        if model_name in ["dkvmn","deep_irt", "sakt", "saint","saint++", "akt", "robustkt", "folibikt", "atkt", "lpkt", "skvmn", "dimkt"]:
+        if model_name in ["dkvmn","deep_irt", "sakt", "saint","saint++", "robustkt", "folibikt", "atkt", "lpkt", "skvmn", "dimkt"]:
             train_config["batch_size"] = 64 ## because of OOM
+        if model_name in ["akt", "aktint"]:
+            train_config["batch_size"] = 32 ## akt and aktint use batch_size=32 for fair comparison
         if model_name in ["simplekt","stablekt", "datakt", "sparsekt"]:
             train_config["batch_size"] = 64 ## because of OOM
         if model_name in ["gkt"]:
@@ -95,7 +97,7 @@ def main(params):
 
     save_config(train_config, model_config, data_config[dataset_name], params, ckpt_path)
     learning_rate = params["learning_rate"]
-    for remove_item in ['use_wandb','learning_rate','add_uuid','l2']:
+    for remove_item in ['use_wandb','learning_rate','add_uuid','l2','batch_size']:
         if remove_item in model_config:
             del model_config[remove_item]
     if model_name in ["saint","saint++", "sakt", "atdkt", "simplekt","stablekt", "datakt","folibikt"]:

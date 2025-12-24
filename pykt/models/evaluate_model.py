@@ -55,10 +55,21 @@ def evaluate(model, test_loader, model_name, rel=None, save_path=""):
         for data in test_loader:
             # if model_name in ["dkt_forget", "lpkt"]:
             #     q, c, r, qshft, cshft, rshft, m, sm, d, dshft = data
-            if model_name in ["dkt_forget", "datakt"]:
-                dcur, dgaps = data
-            else:
+            # Models that use interference gap data (dgaps)
+            # Handle data format: may be (dcur, dgaps) tuple or just dcur
+            # Check if data is a tuple/list with first element being a dict (dcur)
+            if isinstance(data, (tuple, list)) and len(data) >= 2 and isinstance(data[0], dict):
+                dcur, dgaps = data[0], data[1]
+                # Only use dgaps for models that support interference
+                if model_name not in ["dkt_forget", "datakt", "aktint"]:
+                    dgaps = None
+            elif isinstance(data, dict):
                 dcur = data
+                dgaps = None
+            else:
+                # Fallback: assume it's dcur directly
+                dcur = data
+                dgaps = None
             if model_name in ["dimkt"]:
                 q, c, r, sd,qd = dcur["qseqs"], dcur["cseqs"], dcur["rseqs"], dcur["sdseqs"],dcur["qdseqs"]
                 qshft, cshft, rshft, sdshft,qdshft = dcur["shft_qseqs"], dcur["shft_cseqs"], dcur["shft_rseqs"], dcur["shft_sdseqs"],dcur["shft_qdseqs"]
@@ -114,8 +125,21 @@ def evaluate(model, test_loader, model_name, rel=None, save_path=""):
             elif model_name == "saint":
                 y = model(cq.long(), cc.long(), r.long())
                 y = y[:, 1:]
-            elif model_name in ["akt","extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lefokt_akt", "fluckt"]:                                
-                y, reg_loss = model(cc.long(), cr.long(), cq.long())
+            elif model_name in ["akt", "aktint", "extrakt","folibikt", "robustkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lefokt_akt", "fluckt"]:
+                # Prepare dgaps for AKTInt interference-based forgetting
+                if model_name == "aktint" and dgaps is not None:
+                    # Build concatenated sgaps and pcounts (same pattern as cc, cr, cq)
+                    sgaps = dgaps["sgaps"].to(device)
+                    pcounts = dgaps["pcounts"].to(device)
+                    sgaps_shft = dgaps["shft_sgaps"].to(device)
+                    pcounts_shft = dgaps["shft_pcounts"].to(device)
+                    # Concatenate to match cc, cr, cq structure: [first_item, shifted_items]
+                    csgaps = torch.cat((sgaps[:,0:1], sgaps_shft), dim=1)
+                    cpcounts = torch.cat((pcounts[:,0:1], pcounts_shft), dim=1)
+                    dgaps_model = {"sgaps": csgaps, "pcounts": cpcounts}
+                    y, reg_loss = model(cc.long(), cr.long(), cq.long(), dgaps=dgaps_model)
+                else:
+                    y, reg_loss = model(cc.long(), cr.long(), cq.long())
                 y = y[:,1:]
             elif model_name in ["dtransformer"]:
                 output, *_ = model.predict(cc.long(), cr.long(), cq.long())
@@ -183,7 +207,7 @@ def early_fusion(curhs, model, model_name):
         que_diff = model.diff_layer(curhs[1])#equ 13
         p = torch.sigmoid(3.0*stu_ability-que_diff)#equ 14
         p = p.squeeze(-1)
-    elif model_name in ["akt","extrakt", "folibikt","robustkt", "dtransformer","simplekt","stablekt","cskt", "fluckt", "datakt", "sparsekt", "lefokt_akt", "ukt", "hcgkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
+    elif model_name in ["akt", "aktint", "extrakt", "folibikt","robustkt", "dtransformer","simplekt","stablekt","cskt", "fluckt", "datakt", "sparsekt", "lefokt_akt", "ukt", "hcgkt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
         output = model.out(curhs[0]).squeeze(-1)
         m = nn.Sigmoid()
         p = m(output)
@@ -229,7 +253,7 @@ def effective_fusion(df, model, model_name, fusion_type):
 
     curhs, curr = [[], []], []
     dcur = {"late_trues": [], "qidxs": [], "questions": [], "concepts": [], "row": [], "concept_preds": []}
-    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "akt","extrakt", "folibikt", "robustkt", "dtransformer", "simplekt","stablekt","cskt","fluckt", "ukt", "hcgkt", "datakt", "sparsekt","lefokt_akt",  "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
+    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "akt", "aktint", "extrakt", "folibikt", "robustkt", "dtransformer", "simplekt","stablekt","cskt","fluckt", "ukt", "hcgkt", "datakt", "sparsekt","lefokt_akt",  "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
     for ui in df:
         # 一题一题处理
         curdf = ui[1]
@@ -277,8 +301,8 @@ def group_fusion(dmerge, model, model_name, fusion_type, fout):
     if cq.shape[1] == 0:
         cq = cc
 
-    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "dtransformer", "akt","robustkt", "extrakt", "folibikt","simplekt","stablekt","cskt", "fluckt", "ukt",  "hcgkt", "datakt", "sparsekt","lefokt_akt",  "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
-    
+    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "dtransformer", "akt", "aktint", "robustkt", "extrakt", "folibikt","simplekt","stablekt","cskt", "fluckt", "ukt",  "hcgkt", "datakt", "sparsekt","lefokt_akt",  "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
+
     alldfs, drest = [], dict() # not predict infos!
     # print(f"real bz in group fusion: {rs.shape[0]}")
     realbz = rs.shape[0]
@@ -374,7 +398,7 @@ def evaluate_question(model, test_loader, model_name, fusion_type=["early_fusion
     # dkvmn / akt / saint: give cur -> predict cur
     # sakt: give past+cur -> predict cur
     # kqn: give past+cur -> predict cur
-    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "dtransformer", "akt","extrakt","folibikt", "robustkt", "simplekt","cskt","fluckt", "stablekt", "ukt", "hcgkt", "datakt", "sparsekt", "lefokt_akt", "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
+    hasearly = ["dkvmn","deep_irt", "skvmn", "kqn", "dtransformer", "akt", "aktint", "extrakt","folibikt", "robustkt", "simplekt","cskt","fluckt", "stablekt", "ukt", "hcgkt", "datakt", "sparsekt", "lefokt_akt", "saint", "sakt", "hawkes", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx", "lpkt"]
     if save_path != "":
         fout = open(save_path, "w", encoding="utf8")
         if model_name in hasearly:
@@ -390,10 +414,19 @@ def evaluate_question(model, test_loader, model_name, fusion_type=["early_fusion
         y_trues, y_scores = [], []
         lenc = 0
         for data in test_loader:
-            if model_name in ["dkt_forget", "datakt"]:
-                dcurori, dgaps, dqtest = data
+            # Handle data format: may be (dcur, dgaps, dqtest) or (dcur, dqtest) for qtest
+            if isinstance(data, (tuple, list)) and len(data) >= 3 and isinstance(data[0], dict):
+                dcurori, dgaps, dqtest = data[0], data[1], data[2]
+                # Only use dgaps for models that support interference
+                if model_name not in ["dkt_forget", "datakt", "aktint"]:
+                    dgaps = None
+            elif isinstance(data, (tuple, list)) and len(data) == 2:
+                dcurori, dqtest = data[0], data[1]
+                dgaps = None
             else:
-                dcurori, dqtest = data
+                dcurori = data
+                dgaps = None
+                dqtest = None
 
             if model_name in ["dimkt"]:
                 q, c, r ,sd, qd= dcurori["qseqs"], dcurori["cseqs"], dcurori["rseqs"],dcurori["sdseqs"],dcurori["qdseqs"]
@@ -433,8 +466,18 @@ def evaluate_question(model, test_loader, model_name, fusion_type=["early_fusion
                 y = y[:,1:]
             elif model_name in ["rekt"]:
                 y, h = model(dcurori, qtest=True, train=False)
-            elif model_name in ["akt","extrakt", "folibikt","fluckt","robustkt", "lefokt_akt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
-                y, reg_loss, h = model(cc.long(), cr.long(), cq.long(), True)
+            elif model_name in ["akt", "aktint", "extrakt", "folibikt","fluckt","robustkt", "lefokt_akt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
+                if model_name == "aktint" and dgaps is not None:
+                    sgaps = dgaps["sgaps"].to(device)
+                    pcounts = dgaps["pcounts"].to(device)
+                    sgaps_shft = dgaps["shft_sgaps"].to(device)
+                    pcounts_shft = dgaps["shft_pcounts"].to(device)
+                    csgaps = torch.cat((sgaps[:,0:1], sgaps_shft), dim=1)
+                    cpcounts = torch.cat((pcounts[:,0:1], pcounts_shft), dim=1)
+                    dgaps_model = {"sgaps": csgaps, "pcounts": cpcounts}
+                    y, reg_loss, h = model(cc.long(), cr.long(), cq.long(), qtest=True, dgaps=dgaps_model)
+                else:
+                    y, reg_loss, h = model(cc.long(), cr.long(), cq.long(), True)
                 y = y[:,1:]
             elif model_name in ["dtransformer"]:
                 output, h, *_ = model.predict(cc.long(), cr.long(), cq.long())
@@ -934,8 +977,8 @@ def predict_each_group(dtotal, dcur, dforget, curdforget, is_repeat, qidx, uid, 
             # 应该用预测的r更新memory value，但是这里一个知识点一个知识点预测，所以curr不起作用！
             y = model(cin.long(), rin.long())
             pred = y[0][-1]
-        elif model_name in ["akt","extrakt","folibikt","fluckt", "robustkt","lefokt_akt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:  
-            #### 输入有question！     
+        elif model_name in ["akt", "aktint", "extrakt","folibikt","fluckt", "robustkt","lefokt_akt", "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
+            #### 输入有question！
             if qout != None:
                 curq = torch.tensor([[qout.item()]]).to(device)
                 qin = torch.cat((qin, curq), axis=1)
@@ -1318,7 +1361,7 @@ def predict_each_group2(dtotal, dcur, dforget, curdforget, is_repeat, qidx, uid,
         elif model_name == "saint":
             y = model(ccq.long(), ccc.long(), curr.long())
             y = y[:, 1:]
-        elif model_name in ["akt","extrakt","folibikt", "robustkt", "cakt","fluckt","lefokt_akt",  "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:                                
+        elif model_name in ["akt", "aktint", "extrakt","folibikt", "robustkt", "cakt","fluckt","lefokt_akt",  "akt_vector", "akt_norasch", "akt_mono", "akt_attn", "aktattn_pos", "aktmono_pos", "akt_raschx", "akt_raschy", "aktvec_raschx"]:
             y, reg_loss = model(ccc.long(), ccr.long(), ccq.long())
             y = y[:,1:]
         elif model_name in ["dtransformer"]:

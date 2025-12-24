@@ -12,6 +12,7 @@ from .kqn import KQN
 from .atkt import ATKT
 from .dkt_forget import DKTForget
 from .akt import AKT
+from .aktint import AKTInt
 from .gkt import GKT
 from .gkt_utils import get_gkt_graph
 from .lpkt import LPKT
@@ -57,6 +58,8 @@ def init_model(model_name, model_config, data_config, emb_type):
         model = DKTForget(data_config["num_c"], data_config["num_rgap"], data_config["num_sgap"], data_config["num_pcount"], **model_config).to(device)
     elif model_name == "akt":
         model = AKT(data_config["num_c"], data_config["num_q"], **model_config, emb_type=emb_type, emb_path=data_config["emb_path"]).to(device)
+    elif model_name == "aktint":
+        model = AKTInt(data_config["num_c"], data_config["num_q"], **model_config, emb_type=emb_type, emb_path=data_config["emb_path"]).to(device)
     elif model_name == "lefokt_akt":
         model = LEFOKT_AKT(data_config["num_c"], data_config["num_q"], **model_config, emb_type=emb_type, emb_path=data_config["emb_path"]).to(device)
     elif model_name == "extrakt":
@@ -144,6 +147,10 @@ def init_model(model_name, model_config, data_config, emb_type):
     return model
 
 def load_model(model_name, model_config, data_config, emb_type, ckpt_path):
+    # Remove non-model parameters before passing to init_model
+    for remove_item in ['batch_size', 'use_wandb', 'learning_rate', 'add_uuid', 'l2']:
+        if remove_item in model_config:
+            del model_config[remove_item]
     model = init_model(model_name, model_config, data_config, emb_type)
     net = torch.load(os.path.join(ckpt_path, emb_type+"_model.ckpt"))
     model.load_state_dict(net)
